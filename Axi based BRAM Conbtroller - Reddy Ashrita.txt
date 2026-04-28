@@ -1,0 +1,406 @@
+`timescale 1ns / 1ps
+module dual_port_bram #(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 10   // 2^10 = 1024 locations
+)(
+    input clk,
+
+    // Port A (AXI side)
+    input we_a,
+    input [ADDR_WIDTH-1:0] addr_a,
+    input [DATA_WIDTH-1:0] din_a,
+    output reg [DATA_WIDTH-1:0] dout_a,
+
+    // Port B (User side)
+    input we_b,
+    input [ADDR_WIDTH-1:0] addr_b,
+    input [DATA_WIDTH-1:0] din_b,
+    output reg [DATA_WIDTH-1:0] dout_b
+);
+
+    reg [DATA_WIDTH-1:0] mem [0:(1<<ADDR_WIDTH)-1];
+
+    always @(posedge clk) begin
+        // Port A
+        if (we_a)
+            mem[addr_a] <= din_a;
+        dout_a <= mem[addr_a];
+
+        // Port B
+        if (we_b)
+            mem[addr_b] <= din_b;
+        dout_b <= mem[addr_b];
+    end
+
+endmodule
+
+
+
+module axi_bram_ctrl #(
+    parameter DATA_WIDTH = 32,
+    parameter ADDR_WIDTH = 10
+)(
+    input clk,
+    input resetn,
+
+    // AXI Write Address Channel
+    input [ADDR_WIDTH-1:0] S_AXI_AWADDR,
+    input S_AXI_AWVALID,
+    output reg S_AXI_AWREADY,
+
+    // AXI Write Data Channel
+    input [DATA_WIDTH-1:0] S_AXI_WDATA,
+    input S_AXI_WVALID,
+    output reg S_AXI_WREADY,
+
+    // AXI Write Response
+    output reg [1:0] S_AXI_BRESP,
+    output reg S_AXI_BVALID,
+    input S_AXI_BREADY,
+
+    // AXI Read Address Channel
+    input [ADDR_WIDTH-1:0] S_AXI_ARADDR,
+    input S_AXI_ARVALID,
+    output reg S_AXI_ARREADY,
+
+    // AXI Read Data Channel
+    output reg [DATA_WIDTH-1:0] S_AXI_RDATA,
+    output reg [1:0] S_AXI_RRESP,
+    output reg S_AXI_RVALID,
+    input S_AXI_RREADY,
+
+    // BRAM Interface (Port A)
+    output reg we_a,
+    output reg [ADDR_WIDTH-1:0] addr_a,
+    output reg [DATA_WIDTH-1:0] din_a,
+    input [DATA_WIDTH-1:0] dout_a
+);
+
+    // Write FSM
+    always @(posedge clk) begin
+        if (!resetn) begin
+            S_AXI_AWREADY <= 0;
+            S_AXI_WREADY  <= 0;
+            S_AXI_BVALID  <= 0;
+            we_a          <= 0;
+        end else begin
+            // Address handshake
+            if (S_AXI_AWVALID && !S_AXI_AWREADY)
+                S_AXI_AWREADY <= 1;
+            else
+                S_AXI_AWREADY <= 0;
+
+            // Data handshake
+            if (S_AXI_WVALID && !S_AXI_WREADY) begin
+                S_AXI_WREADY <= 1;
+                addr_a <= S_AXI_AWADDR;
+                din_a  <= S_AXI_WDATA;
+                we_a   <= 1;
+            end else begin
+                S_AXI_WREADY <= 0;
+                we_a <= 0;
+            end
+
+            // Write response
+            if (S_AXI_WREADY) begin
+                S_AXI_BVALID <= 1;
+                S_AXI_BRESP  <= 2'b00; // OKAY
+            end else if (S_AXI_BREADY) begin
+                S_AXI_BVALID <= 0;
+            end
+        end
+    end
+
+    // Read FSM
+    always @(posedge clk) begin
+        if (!resetn) begin
+            S_AXI_ARREADY <= 0;
+            S_AXI_RVALID  <= 0;
+        end else begin
+            if (S_AXI_ARVALID && !S_AXI_ARREADY) begin
+                S_AXI_ARREADY <= 1;
+                addr_a <= S_AXI_ARADDR;
+            end else begin
+                S_AXI_ARREADY <= 0;
+            end
+
+            if (S_AXI_ARREADY) begin
+                S_AXI_RVALID <= 1;
+                S_AXI_RDATA  <= dout_a;
+                S_AXI_RRESP  <= 2'b00;
+            end else if (S_AXI_RREADY) begin
+                S_AXI_RVALID <= 0;
+            end
+        end
+    end
+
+endmodule
+module dual (
+    input clk,
+    input resetn,
+
+    // AXI Interface
+    input [9:0] AWADDR,
+    input AWVALID,
+    output AWREADY,
+
+    input [31:0] WDATA,
+    input WVALID,
+    output WREADY,
+
+    output [1:0] BRESP,
+    output BVALID,
+    input BREADY,
+
+    input [9:0] ARADDR,
+    input ARVALID,
+    output ARREADY,
+
+    output [31:0] RDATA,
+    output [1:0] RRESP,
+    output RVALID,
+    input RREADY,
+
+    // Port B (User)
+    input we_b,
+    input [9:0] addr_b,
+    input [31:0] din_b,
+    output [31:0] dout_b
+);
+
+    wire we_a;
+    wire [9:0] addr_a;
+    wire [31:0] din_a, dout_a;
+
+    axi_bram_ctrl ctrl (
+        .clk(clk),
+        .resetn(resetn),
+
+        .S_AXI_AWADDR(AWADDR),
+        .S_AXI_AWVALID(AWVALID),
+        .S_AXI_AWREADY(AWREADY),
+
+        .S_AXI_WDATA(WDATA),
+        .S_AXI_WVALID(WVALID),
+        .S_AXI_WREADY(WREADY),
+
+        .S_AXI_BRESP(BRESP),
+        .S_AXI_BVALID(BVALID),
+        .S_AXI_BREADY(BREADY),
+
+        .S_AXI_ARADDR(ARADDR),
+        .S_AXI_ARVALID(ARVALID),
+        .S_AXI_ARREADY(ARREADY),
+
+        .S_AXI_RDATA(RDATA),
+        .S_AXI_RRESP(RRESP),
+        .S_AXI_RVALID(RVALID),
+        .S_AXI_RREADY(RREADY),
+
+        .we_a(we_a),
+        .addr_a(addr_a),
+        .din_a(din_a),
+        .dout_a(dout_a)
+    );
+
+    dual_port_bram bram (
+        .clk(clk),
+
+        .we_a(we_a),
+        .addr_a(addr_a),
+        .din_a(din_a),
+        .dout_a(dout_a),
+
+        .we_b(we_b),
+        .addr_b(addr_b),
+        .din_b(din_b),
+        .dout_b(dout_b)
+    );
+
+endmodule
+`timescale 1ns/1ps
+
+module dual_tb;
+
+    // Clock
+    reg clk = 0;
+    always #5 clk = ~clk;
+
+    // Reset
+    reg resetn;
+
+    // -------- AXI (PORT A) --------
+    reg [9:0] AWADDR;
+    reg AWVALID;
+    wire AWREADY;
+
+    reg [31:0] WDATA;
+    reg WVALID;
+    wire WREADY;
+
+    wire [1:0] BRESP;
+    wire BVALID;
+    reg BREADY;
+
+    reg [9:0] ARADDR;
+    reg ARVALID;
+    wire ARREADY;
+
+    wire [31:0] RDATA;
+    wire [1:0] RRESP;
+    wire RVALID;
+    reg RREADY;
+
+    // -------- PORT B --------
+    reg we_b;
+    reg [9:0] addr_b;
+    reg [31:0] din_b;
+    wire [31:0] dout_b;
+
+    // -------- DUT --------
+    dual dut (
+        .clk(clk),
+        .resetn(resetn),
+
+        .AWADDR(AWADDR),
+        .AWVALID(AWVALID),
+        .AWREADY(AWREADY),
+
+        .WDATA(WDATA),
+        .WVALID(WVALID),
+        .WREADY(WREADY),
+
+        .BRESP(BRESP),
+        .BVALID(BVALID),
+        .BREADY(BREADY),
+
+        .ARADDR(ARADDR),
+        .ARVALID(ARVALID),
+        .ARREADY(ARREADY),
+
+        .RDATA(RDATA),
+        .RRESP(RRESP),
+        .RVALID(RVALID),
+        .RREADY(RREADY),
+
+        .we_b(we_b),
+        .addr_b(addr_b),
+        .din_b(din_b),
+        .dout_b(dout_b)
+    );
+
+    // -------- VCD --------
+    initial begin
+        $dumpfile("dump.vcd");
+        $dumpvars(0, dual_tb);
+    end
+
+    // -------- AXI WRITE (PORT A) --------
+    task axi_write(input [9:0] addr, input [31:0] data);
+    begin
+        @(posedge clk);
+        AWADDR  <= addr;
+        AWVALID <= 1;
+        WDATA   <= data;
+        WVALID  <= 1;
+        BREADY  <= 1;
+
+        wait (AWREADY && WREADY);
+
+        @(posedge clk);
+        AWVALID <= 0;
+        WVALID  <= 0;
+
+        wait (BVALID);
+        $display("PORT A WRITE: Addr=%0d Data=%h", addr, data);
+
+        @(posedge clk);
+        BREADY <= 0;
+    end
+    endtask
+
+    // -------- AXI READ (PORT A) --------
+    task axi_read(input [9:0] addr);
+    begin
+        @(posedge clk);
+        ARADDR  <= addr;
+        ARVALID <= 1;
+        RREADY  <= 1;
+
+        wait (ARREADY);
+
+        @(posedge clk);
+        ARVALID <= 0;
+
+        wait (RVALID);
+        $display("PORT A READ : Addr=%0d Data=%h", addr, RDATA);
+
+        @(posedge clk);
+        RREADY <= 0;
+    end
+    endtask
+
+    // -------- PORT B WRITE --------
+    task portb_write(input [9:0] addr, input [31:0] data);
+    begin
+        @(posedge clk);
+        we_b   <= 1;
+        addr_b <= addr;
+        din_b  <= data;
+
+        @(posedge clk);
+        we_b <= 0;
+
+        $display("PORT B WRITE: Addr=%0d Data=%h", addr, data);
+    end
+    endtask
+
+    // -------- PORT B READ --------
+    task portb_read(input [9:0] addr);
+    begin
+        @(posedge clk);
+        addr_b <= addr;
+
+        @(posedge clk); // 1-cycle latency
+
+        $display("PORT B READ : Addr=%0d Data=%h", addr, dout_b);
+    end
+    endtask
+
+    // -------- MAIN TEST --------
+    initial begin
+
+        // Init
+        AWADDR=0; AWVALID=0;
+        WDATA=0;  WVALID=0;
+        BREADY=0;
+        ARADDR=0; ARVALID=0;
+        RREADY=0;
+        we_b=0; addr_b=0; din_b=0;
+
+        // Reset
+        resetn = 0;
+        #20;
+        resetn = 1;
+
+        // ===== TEST 1: PORT A =====
+        axi_write(10'd1, 32'h11111111);
+        axi_read(10'd1);
+
+        // ===== TEST 2: PORT B =====
+        portb_write(10'd2, 32'h22222222);
+        portb_read(10'd2);
+
+        // ===== TEST 3: B ? A =====
+        portb_write(10'd3, 32'h33333333);
+        axi_read(10'd3);
+
+        // ===== TEST 4: A ? B =====
+        axi_write(10'd4, 32'h44444444);
+        portb_read(10'd4);
+
+        #1000;
+        $finish;
+    end
+
+endmodule
